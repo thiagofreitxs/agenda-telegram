@@ -1,0 +1,28 @@
+# Segredos e credenciais
+.env
+token.json
+client_secret*.json
+service_account*.json
+deploy_env.txt
+*.pem
+*.secrets.txt
+
+# Banco de dados local
+data/
+*.db
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Sistema
+.DS_Store
+Thumbs.db

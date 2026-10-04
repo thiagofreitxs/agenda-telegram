@@ -1,0 +1,12 @@
+# Bot + agendador
+python-telegram-bot[job-queue]>=21.6,<23
+# Google Calendar
+google-api-python-client>=2.147.0,<3
+google-auth>=2.35.0,<3
+google-auth-oauthlib>=1.2.1,<2
+# Parsing de datas em linguagem natural (pt-BR)
+dateparser>=1.2.0,<2
+# Configuração via .env
+python-dotenv>=1.0.1,<2
+# Fuso horário (garante base tzdata em containers enxutos)
+tzdata>=2024.2

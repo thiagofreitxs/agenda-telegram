@@ -1,0 +1,13 @@
+services:
+  agenda-bot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Persiste o banco de lembretes e o token OAuth entre reinícios.
+      - ./data:/app/data
+      - ./token.json:/app/token.json
+    # OPCIONAL: se você usa arquivo de credenciais em vez de variáveis de ambiente.
+    # - ./client_secret.json:/app/client_secret.json:ro
+    # - ./service_account.json:/app/service_account.json:ro
