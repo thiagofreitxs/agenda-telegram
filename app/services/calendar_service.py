@@ -72,8 +72,21 @@ def _load_credentials():
 
     # 2) Conta de serviço via JSON (variável de ambiente) ou arquivo.
     if config.GOOGLE_SERVICE_ACCOUNT_JSON:
-        info = json.loads(config.GOOGLE_SERVICE_ACCOUNT_JSON)
-        return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+        try:
+            info = json.loads(config.GOOGLE_SERVICE_ACCOUNT_JSON)
+        except json.JSONDecodeError as exc:
+            raise CalendarError(
+                "GOOGLE_SERVICE_ACCOUNT_JSON não é um JSON válido. "
+                "Verifique se você colou a linha inteira, sem quebras."
+            ) from exc
+        try:
+            return service_account.Credentials.from_service_account_info(
+                info, scopes=SCOPES
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise CalendarError(
+                f"GOOGLE_SERVICE_ACCOUNT_JSON inválido: {type(exc).__name__}: {exc}"
+            ) from exc
     if config.GOOGLE_SERVICE_ACCOUNT_FILE and os.path.exists(
         config.GOOGLE_SERVICE_ACCOUNT_FILE
     ):

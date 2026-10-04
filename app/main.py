@@ -10,6 +10,7 @@ from telegram.ext import (
     Application,
     ApplicationBuilder,
     CommandHandler,
+    ContextTypes,
     MessageHandler,
     filters,
 )
@@ -44,6 +45,18 @@ async def _post_init(application: Application) -> None:
     logger.info("Bot iniciado como @%s", me.username)
 
 
+async def _on_error(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Mostra qualquer erro no chat em vez de ficar em silêncio."""
+    logger.error("Erro ao processar uma atualização.", exc_info=context.error)
+    if update and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                f"❌ Erro inesperado: {type(context.error).__name__}: {context.error}"
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def build_application() -> Application:
     app = (
         ApplicationBuilder()
@@ -68,6 +81,7 @@ def build_application() -> Application:
     # Texto livre (sem "/") vira um novo evento automaticamente.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.on_text))
     app.add_handler(MessageHandler(filters.COMMAND, handlers.cmd_erro))
+    app.add_error_handler(_on_error)
 
     job_queue = app.job_queue
     if job_queue is not None:

@@ -185,9 +185,12 @@ async def _create_event(update: Update, text: str) -> None:
             parsed.start,
             parsed.end,
         )
-    except calendar_service.CalendarError as exc:
+    except Exception as exc:  # inclui CalendarError
         logger.exception("Erro ao criar evento")
-        await message.reply_text(f"❌ {exc}")
+        await message.reply_text(
+            f"❌ Não consegui criar o evento.\n`{type(exc).__name__}: {exc}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
 
     await message.reply_text(
@@ -204,8 +207,12 @@ async def _list_range(update: Update, start: datetime, end: datetime, header: st
     await message.chat.send_action("typing")
     try:
         events = await _fetch_events(start, end)
-    except calendar_service.CalendarError as exc:
-        await message.reply_text(f"❌ {exc}")
+    except Exception as exc:  # inclui CalendarError
+        logger.exception("Erro no Google Calendar")
+        await message.reply_text(
+            f"❌ Erro ao falar com o Google Calendar.\n`{type(exc).__name__}: {exc}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
 
     if not events:
@@ -282,8 +289,12 @@ async def cmd_cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     try:
         event = await asyncio.to_thread(calendar_service.find_event_by_prefix, payload)
-    except calendar_service.CalendarError as exc:
-        await message.reply_text(f"❌ {exc}")
+    except Exception as exc:  # inclui CalendarError
+        logger.exception("Erro no Google Calendar")
+        await message.reply_text(
+            f"❌ Erro ao falar com o Google Calendar.\n`{type(exc).__name__}: {exc}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
 
     if event is None:
@@ -292,8 +303,12 @@ async def cmd_cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     try:
         await asyncio.to_thread(calendar_service.delete_event, event.id)
-    except calendar_service.CalendarError as exc:
-        await message.reply_text(f"❌ {exc}")
+    except Exception as exc:  # inclui CalendarError
+        logger.exception("Erro no Google Calendar")
+        await message.reply_text(
+            f"❌ Erro ao falar com o Google Calendar.\n`{type(exc).__name__}: {exc}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
 
     await message.reply_text(
