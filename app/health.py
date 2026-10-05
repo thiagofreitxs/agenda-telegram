@@ -7,10 +7,13 @@ na variável de ambiente ``PORT``. Este servidor responde 200 OK e mantém o bot
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -48,3 +51,18 @@ def start_health_server() -> HTTPServer | None:
     thread.start()
     logger.info("Health-check ouvindo na porta %s", port)
     return server
+
+
+async def self_ping_job(context) -> None:
+    """Faz o serviço acessar a própria URL pública para não dormir (Render free).
+
+    O Render disponibiliza a variável RENDER_EXTERNAL_URL automaticamente.
+    """
+    url = os.getenv("RENDER_EXTERNAL_URL")
+    if not url:
+        return
+    try:
+        await asyncio.to_thread(lambda: requests.get(url, timeout=30))
+        logger.info("Auto-ping OK (%s)", url)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Auto-ping falhou: %s", exc)

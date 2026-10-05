@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import time as dtime
 
 from telegram import BotCommand, Update
@@ -17,7 +18,7 @@ from telegram.ext import (
 )
 
 from . import config, db, handlers
-from .health import start_health_server
+from .health import self_ping_job, start_health_server
 from .services import chat_cleaner
 from .services.reminder_service import check_reminders, cleanup_job
 
@@ -104,6 +105,9 @@ def build_application() -> Application:
             interval=config.AUTOCLEAN_MINUTES * 60,
             first=60,
         )
+        # Auto-ping para não dormir (plano grátis do Render).
+        if os.getenv("RENDER_EXTERNAL_URL"):
+            job_queue.run_repeating(self_ping_job, interval=600, first=120)
     else:
         logger.warning("JobQueue indisponível: instale python-telegram-bot[job-queue].")
 
