@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from dateparser.search import search_dates
+import dateparser
 
 # Horário explícito no formato "14:00"/"14:30" (após normalização).
 _CLOCK_PATTERN = re.compile(r"\d{1,2}:\d{2}")
@@ -184,3 +185,28 @@ def parse_event_text(
 
     title = _clean_title(working.replace(matched_text, " ", 1))
     return _build(title, start, duration_min)
+
+
+def parse_day(text: str, *, timezone: str):
+    """Interpreta apenas uma data (dia) e devolve um ``datetime.date``.
+
+    Ex.: "hoje", "amanhã", "25/12", "segunda". Retorna None se não entender.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    tz = ZoneInfo(timezone)
+    settings = {
+        "TIMEZONE": timezone,
+        "RETURN_AS_TIMEZONE_AWARE": True,
+        "PREFER_DATES_FROM": "future",
+        "RELATIVE_BASE": datetime.now(tz),
+    }
+    try:
+        dt = dateparser.parse(text, languages=["pt", "en"], settings=settings)
+    except Exception:
+        dt = None
+    if dt is None:
+        return None
+    dt = dt.astimezone(tz) if dt.tzinfo else dt.replace(tzinfo=tz)
+    return dt.date()

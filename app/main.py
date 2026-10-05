@@ -12,11 +12,13 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
 from . import config, db, handlers
 from .health import start_health_server
+from .services import chat_cleaner
 from .services.reminder_service import check_reminders, cleanup_job
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,9 @@ COMMANDS = [
     ("semana", "Próximos 7 dias"),
     ("proximos", "Próximos compromissos"),
     ("cancelar", "Cancelar um evento"),
+    ("limpar_dia", "Apagar os eventos de um dia"),
+    ("limpar_tudo", "Apagar todos os eventos futuros"),
+    ("autolimpar", "Ligar/desligar a limpeza da conversa"),
     ("lembrete", "Minutos de antecedência do aviso"),
     ("diario", "Horário do aviso de eventos de dia inteiro"),
     ("status", "Configuração atual"),
@@ -78,6 +83,11 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("cancelar", handlers.cmd_cancelar))
     app.add_handler(CommandHandler("lembrete", handlers.cmd_lembrete))
     app.add_handler(CommandHandler("diario", handlers.cmd_diario))
+    app.add_handler(CommandHandler("limpar_dia", handlers.cmd_limpar_dia))
+    app.add_handler(CommandHandler("limpar_tudo", handlers.cmd_limpar_tudo))
+    app.add_handler(CommandHandler("autolimpar", handlers.cmd_autolimpar))
+    # Registra a última mensagem de cada chat (para a limpeza automática).
+    app.add_handler(TypeHandler(Update, chat_cleaner.track_message), group=-1)
     # Texto livre (sem "/") vira um novo evento automaticamente.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.on_text))
     app.add_handler(MessageHandler(filters.COMMAND, handlers.cmd_erro))
@@ -89,6 +99,11 @@ def build_application() -> Application:
             check_reminders, interval=config.REMINDER_CHECK_INTERVAL_SECONDS, first=10
         )
         job_queue.run_daily(cleanup_job, time=dtime(3, 0))
+        job_queue.run_repeating(
+            chat_cleaner.autoclean_job,
+            interval=config.AUTOCLEAN_MINUTES * 60,
+            first=60,
+        )
     else:
         logger.warning("JobQueue indisponível: instale python-telegram-bot[job-queue].")
 

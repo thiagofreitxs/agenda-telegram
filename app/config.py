@@ -53,6 +53,9 @@ DEFAULT_EVENT_TIME: str = _get_str("DEFAULT_EVENT_TIME", "09:00")
 REMINDER_LEAD_MINUTES: int = _get_int("REMINDER_LEAD_MINUTES", 30)
 REMINDER_CHECK_INTERVAL_SECONDS: int = _get_int("REMINDER_CHECK_INTERVAL_SECONDS", 60)
 ALL_DAY_REMINDER_TIME: str = _get_str("ALL_DAY_REMINDER_TIME", "08:00")
+# Limpeza automática da conversa (apaga as mensagens do chat periodicamente).
+AUTOCLEAN_MINUTES: int = _get_int("AUTOCLEAN_MINUTES", 30)
+AUTOCLEAN_ENABLED: bool = _get_str("AUTOCLEAN_ENABLED", "true").lower() not in {"0", "false", "no"}
 
 
 def has_google_credentials() -> bool:

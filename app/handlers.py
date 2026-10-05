@@ -13,8 +13,8 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from . import config, db
-from .services import calendar_service
-from .utils.parsing import parse_event_text
+from .services import calendar_service, chat_cleaner
+from .utils.parsing import parse_day, parse_event_text
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +103,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• `/proximos 10` — próximos compromissos\n\n"
         "*Gerenciar:*\n"
         "• `/cancelar` — lista e cancela um evento\n"
+        "• `/limpar_dia amanhã` — apaga os eventos de um dia\n"
+        "• `/limpar_tudo` — apaga todos os eventos futuros (com confirmação)\n"
+        "• `/autolimpar on|off` — limpa esta conversa automaticamente\n"
         "• `/lembrete 60` — avisar X minutos antes\n"
         "• `/diario 08:00` — horário do aviso de eventos de dia inteiro\n"
         "• `/id` — mostra seu ID do Telegram\n"
@@ -358,6 +361,141 @@ async def cmd_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     db.set_setting("all_day_reminder_time", value)
     await update.effective_message.reply_text(
         f"✅ Eventos de dia inteiro serão avisados às *{value}*.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+@restricted
+async def cmd_limpar_dia(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Apaga todos os eventos de um dia específico."""
+    message = update.effective_message
+    payload = _payload(update)
+    if not payload:
+        await message.reply_text(
+            "🗓 Use assim: `/limpar_dia amanhã` ou `/limpar_dia 25/12`.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    day = parse_day(payload, timezone=config.TIMEZONE)
+    if day is None:
+        await message.reply_text(
+            "🤔 Não entendi a data. Tente: `/limpar_dia 25/12` ou `/limpar_dia amanhã`.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    tz = _tz()
+    start = datetime(day.year, day.month, day.day, tzinfo=tz)
+    end = start + timedelta(days=1)
+
+    await message.chat.send_action("typing")
+    try:
+        events = await asyncio.to_thread(
+            calendar_service.list_events, start, end, 250
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Erro ao listar eventos do dia")
+        await message.reply_text(
+            f"❌ Erro ao consultar a agenda.\n`{type(exc).__name__}: {exc}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if not events:
+        await message.reply_text(
+            f"Não há eventos em *{day.strftime('%d/%m/%Y')}*.", parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    deleted, failed = await asyncio.to_thread(calendar_service.delete_events, events)
+    texto = f"🗑 Apaguei *{deleted}* evento(s) de *{day.strftime('%d/%m/%Y')}*."
+    if failed:
+        texto += f"\n⚠️ {failed} não puderam ser apagados."
+    await message.reply_text(texto, parse_mode=ParseMode.MARKDOWN)
+
+
+@restricted
+async def cmd_limpar_tudo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Apaga TODOS os eventos futuros (exige confirmação)."""
+    message = update.effective_message
+    payload = _payload(update).strip().lower()
+    tz = _tz()
+    now = datetime.now(tz)
+    limite = now + timedelta(days=3650)
+
+    confirmado = payload in {"confirmar", "confirmo", "sim", "confirma", "yes"}
+    if not confirmado:
+        await message.chat.send_action("typing")
+        try:
+            events = await asyncio.to_thread(
+                calendar_service.list_all_events, now, limite
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Erro ao listar todos os eventos")
+            await message.reply_text(
+                f"❌ Erro ao consultar a agenda.\n`{type(exc).__name__}: {exc}`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        if not events:
+            await message.reply_text("Não há eventos futuros para apagar.")
+            return
+        await message.reply_text(
+            f"⚠️ Isso vai *apagar {len(events)} evento(s)* a partir de agora "
+            "(incluindo de hoje).\n\nTem certeza? Para confirmar, envie:\n"
+            f"`/limpar_tudo confirmar`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    await message.chat.send_action("typing")
+    try:
+        events = await asyncio.to_thread(calendar_service.list_all_events, now, limite)
+    except Exception as exc:  # noqa: BLE001
+        await message.reply_text(
+            f"❌ Erro ao consultar a agenda.\n`{type(exc).__name__}: {exc}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if not events:
+        await message.reply_text("Não há eventos futuros para apagar.")
+        return
+
+    deleted, failed = await asyncio.to_thread(calendar_service.delete_events, events)
+    texto = f"🗑 Apaguei *{deleted}* evento(s) futuros."
+    if failed:
+        texto += f"\n⚠️ {failed} não puderam ser apagados."
+    await message.reply_text(texto, parse_mode=ParseMode.MARKDOWN)
+
+
+@restricted
+async def cmd_autolimpar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Liga/desliga a limpeza automática da conversa."""
+    payload = _payload(update).strip().lower()
+    ligar = {"on", "ligar", "ativar", "sim", "1", "true"}
+    desligar = {"off", "desligar", "desativar", "nao", "não", "0", "false"}
+
+    if payload in ligar:
+        chat_cleaner.set_enabled(True)
+        await update.effective_message.reply_text(
+            f"🧹 Limpeza automática *ATIVADA* (a cada {config.AUTOCLEAN_MINUTES} min).",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    if payload in desligar:
+        chat_cleaner.set_enabled(False)
+        await update.effective_message.reply_text(
+            "🧹 Limpeza automática *DESATIVADA*. A conversa não será mais apagada.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    estado = "ATIVADA" if chat_cleaner.is_enabled() else "DESATIVADA"
+    await update.effective_message.reply_text(
+        f"🧹 Limpeza automática está *{estado}* (a cada {config.AUTOCLEAN_MINUTES} min).\n"
+        "Para mudar: `/autolimpar on` ou `/autolimpar off`.",
         parse_mode=ParseMode.MARKDOWN,
     )
 

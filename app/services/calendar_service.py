@@ -193,6 +193,55 @@ def list_events(time_min: datetime, time_max: datetime, max_results: int = 50) -
     ]
 
 
+def list_all_events(
+    time_min: datetime, time_max: datetime, page_limit: int = 250, max_events: int = 5000
+) -> list[Event]:
+    """Lista TODOS os eventos do intervalo, paginando (para limpezas)."""
+    service = _service()
+    events: list[Event] = []
+    page_token: str | None = None
+    while True:
+        try:
+            result = (
+                service.events()
+                .list(
+                    calendarId=config.GOOGLE_CALENDAR_ID,
+                    timeMin=time_min.astimezone(_tz()).isoformat(),
+                    timeMax=time_max.astimezone(_tz()).isoformat(),
+                    singleEvents=True,
+                    orderBy="startTime",
+                    maxResults=page_limit,
+                    pageToken=page_token,
+                )
+                .execute()
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise CalendarError(f"Falha ao consultar o Google Calendar: {exc}") from exc
+
+        events.extend(
+            _to_event(item)
+            for item in result.get("items", [])
+            if item.get("status") != "cancelled"
+        )
+        page_token = result.get("nextPageToken")
+        if not page_token or len(events) >= max_events:
+            break
+    return events
+
+
+def delete_events(events: list[Event]) -> tuple[int, int]:
+    """Apaga uma lista de eventos. Devolve (apagados, falhas)."""
+    deleted = 0
+    failed = 0
+    for event in events:
+        try:
+            delete_event(event.id)
+            deleted += 1
+        except CalendarError:
+            failed += 1
+    return deleted, failed
+
+
 def create_event(
     summary: str,
     start: datetime,
