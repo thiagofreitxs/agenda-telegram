@@ -1,0 +1,25 @@
+name: keepalive
+
+# Mantém o serviço gratuito do Render "acordado", pingando o health-check.
+# O plano free do Render dorme após ~15 min sem acesso; um ping a cada 5 min
+# evita isso. Roda a cada 5 minutos e também pode ser disparado manualmente.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping no health-check do bot
+        run: |
+          for i in 1 2 3; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 https://agenda-telegram-bot.onrender.com/ || true)
+            echo "Tentativa $i -> HTTP $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 20
+          done
+          # Não falha o workflow se o serviço estiver reiniciando.
+          exit 0
