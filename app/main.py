@@ -38,6 +38,7 @@ COMMANDS = [
     ("lembrete", "Minutos de antecedência do aviso"),
     ("diario", "Horário do aviso de dia inteiro"),
     ("autolimpar", "Ligar/desligar a limpeza da conversa"),
+    ("limpar_apos", "Limpar a conversa após criar um evento"),
     ("status", "Configuração atual"),
     ("desconectar", "Desconectar sua conta Google"),
     ("id", "Mostrar seu ID do Telegram"),
@@ -91,6 +92,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("lembrete", handlers.cmd_lembrete))
     app.add_handler(CommandHandler("diario", handlers.cmd_diario))
     app.add_handler(CommandHandler("autolimpar", handlers.cmd_autolimpar))
+    app.add_handler(CommandHandler("limpar_apos", handlers.cmd_limpar_apos))
     app.add_handler(TypeHandler(Update, chat_cleaner.track_message), group=-1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.on_text))
     app.add_handler(MessageHandler(filters.COMMAND, handlers.cmd_erro))

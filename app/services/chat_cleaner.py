@@ -34,6 +34,37 @@ async def track_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         db.set_setting(_last_key(chat.id), str(message.message_id))
 
 
+async def clean_now(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> int:
+    """Apaga as mensagens recentes de um chat. Devolve quantas apagou."""
+    try:
+        last = int(db.get_setting(_last_key(chat_id), "0") or 0)
+    except (TypeError, ValueError):
+        last = 0
+    if last <= 0:
+        return 0
+
+    inicio = max(1, last - _JANELA)
+    fim = last + _MARGEM
+    apagadas = 0
+    for message_id in range(inicio, fim + 1):
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+            apagadas += 1
+        except Exception:  # noqa: BLE001
+            pass
+    db.set_setting(_last_key(chat_id), "0")
+    if apagadas:
+        logger.info("Limpeza: %s mensagens apagadas no chat %s", apagadas, chat_id)
+    return apagadas
+
+
+async def clean_after_event_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Job disparado logo depois que o usuário cria um evento."""
+    chat_id = getattr(context.job, "data", None)
+    if chat_id:
+        await clean_now(context, int(chat_id))
+
+
 async def autoclean_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     if config.AUTOCLEAN_MINUTES <= 0:
         return
@@ -45,22 +76,4 @@ async def autoclean_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             chat_id = int(tid)
         except (TypeError, ValueError):
             continue
-        try:
-            last = int(db.get_setting(_last_key(chat_id), "0") or 0)
-        except (TypeError, ValueError):
-            last = 0
-        if last <= 0:
-            continue
-
-        inicio = max(1, last - _JANELA)
-        fim = last + _MARGEM
-        apagadas = 0
-        for message_id in range(inicio, fim + 1):
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-                apagadas += 1
-            except Exception:  # noqa: BLE001
-                pass
-        db.set_setting(_last_key(chat_id), "0")
-        if apagadas:
-            logger.info("Auto-limpeza: %s mensagens apagadas no chat %s", apagadas, chat_id)
+        await clean_now(context, chat_id)

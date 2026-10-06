@@ -13,7 +13,7 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from . import config, store, web
-from .services import auth, calendar_service
+from .services import auth, calendar_service, chat_cleaner
 from .utils.parsing import parse_day, parse_event_text
 
 logger = logging.getLogger(__name__)
@@ -121,7 +121,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• `/limpar_dia amanhã` — apaga o dia\n"
         "• `/limpar_tudo` — apaga tudo (com confirmação)\n"
         "• `/lembrete 60` — avisar X min antes\n"
-        "• `/autolimpar on|off` — limpar a conversa\n"
+        "• `/autolimpar on|off` — limpar esta conversa periodicamente\n"
+        "• `/limpar_apos on|off` — limpar após criar um evento\n"
         "• `/desconectar` · `/status` · `/id`\n\n"
         "Digite `/ajuda` para ver isto de novo.",
         parse_mode=ParseMode.MARKDOWN,
@@ -205,7 +206,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_novo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _create_event(update, _payload(update))
+    await _create_event(update, context, _payload(update))
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -217,10 +218,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "🔒 Conecte seu Google primeiro com /conectar."
         )
         return
-    await _create_event(update, text)
+    await _create_event(update, context, text)
 
 
-async def _create_event(update: Update, text: str) -> None:
+async def _create_event(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
     message = update.effective_message
     if not text:
         await message.reply_text(
@@ -267,6 +268,19 @@ async def _create_event(update: Update, text: str) -> None:
         f"⏳ Aviso {lead} min antes.",
         parse_mode=ParseMode.MARKDOWN,
     )
+
+    # Limpa a conversa logo depois de agendar (dá uma pausa para ler).
+    if (
+        config.CLEAN_AFTER_EVENT_SECONDS > 0
+        and context.job_queue is not None
+        and _user(update).get("clean_after_event", "1") != "0"
+    ):
+        context.job_queue.run_once(
+            chat_cleaner.clean_after_event_job,
+            when=config.CLEAN_AFTER_EVENT_SECONDS,
+            data=update.effective_chat.id,
+            name=f"clean_{update.effective_chat.id}",
+        )
 
 
 async def _list_range(update: Update, start: datetime, end: datetime, header: str) -> None:
@@ -500,6 +514,35 @@ async def cmd_autolimpar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.effective_message.reply_text(
         f"🧹 Limpeza da conversa está *{estado}* (a cada {config.AUTOCLEAN_MINUTES} min).\n"
         "Para mudar: `/autolimpar on` ou `/autolimpar off`.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def cmd_limpar_apos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    payload = _payload(update).strip().lower()
+    uid = update.effective_user.id
+    user = _user(update)
+    ligar = {"on", "ligar", "ativar", "sim", "1", "true"}
+    desligar = {"off", "desligar", "desativar", "nao", "não", "0", "false"}
+    if payload in ligar:
+        store.update_user(uid, clean_after_event="1")
+        await update.effective_message.reply_text(
+            f"🧽 Pronto! Vou limpar a conversa *{config.CLEAN_AFTER_EVENT_SECONDS}s* "
+            "depois de cada evento criado.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    if payload in desligar:
+        store.update_user(uid, clean_after_event="0")
+        await update.effective_message.reply_text(
+            "🧽 Limpeza após agendar *DESATIVADA*.", parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    estado = "ATIVADA" if user.get("clean_after_event", "1") == "1" else "DESATIVADA"
+    await update.effective_message.reply_text(
+        f"🧽 Limpeza após agendar está *{estado}* "
+        f"({config.CLEAN_AFTER_EVENT_SECONDS}s depois do evento).\n"
+        "Para mudar: `/limpar_apos on` ou `/limpar_apos off`.",
         parse_mode=ParseMode.MARKDOWN,
     )
 

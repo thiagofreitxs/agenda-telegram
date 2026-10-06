@@ -49,6 +49,8 @@ AUTOCLEAN_ENABLED: bool = _get_str("AUTOCLEAN_ENABLED", "true").lower() not in {
     "false",
     "no",
 }
+# Limpar a conversa logo após criar um evento (segundos de pausa para ler).
+CLEAN_AFTER_EVENT_SECONDS: int = _get_int("CLEAN_AFTER_EVENT_SECONDS", 12)
 
 # --- OAuth Web do Google ----------------------------------------------------
 # URL pública do serviço (no Render é definido automaticamente).
