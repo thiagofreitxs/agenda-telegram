@@ -1,19 +1,18 @@
-"""Comandos e mensagens que o bot responde no Telegram."""
+"""Comandos e mensagens que o bot responde no Telegram (multiusuário)."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from functools import wraps
 from zoneinfo import ZoneInfo
 
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
-from . import config, db
-from .services import calendar_service, chat_cleaner
+from . import config, store, web
+from .services import auth, calendar_service
 from .utils.parsing import parse_day, parse_event_text
 
 logger = logging.getLogger(__name__)
@@ -30,6 +29,10 @@ _WEEKDAYS = [
 _WEEKDAYS_ABBR = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
 
 
+def _tz() -> ZoneInfo:
+    return ZoneInfo(config.TIMEZONE)
+
+
 def _weekday_full(dt: datetime) -> str:
     return _WEEKDAYS[dt.weekday()]
 
@@ -38,44 +41,51 @@ def _weekday_abbr(dt: datetime) -> str:
     return _WEEKDAYS_ABBR[dt.weekday()]
 
 
-# --- utilidades --------------------------------------------------------------
-def _tz() -> ZoneInfo:
-    return ZoneInfo(config.TIMEZONE)
-
-
-def restricted(func):
-    """Garante que só os IDs autorizados usem o bot."""
-
-    @wraps(func)
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
-        allowed = config.ALLOWED_TELEGRAM_IDS
-        if allowed and (user is None or user.id not in allowed):
-            if update.effective_message:
-                await update.effective_message.reply_text(
-                    "⛔ Você não tem acesso a esta agenda.\n"
-                    f"Seu ID é `{user.id if user else '?'}`."
-                )
-            return
-        return await func(update, context)
-
-    return wrapper
-
-
 def _payload(update: Update) -> str:
-    """Retorna o texto digitado depois do comando."""
     text = (update.effective_message.text or "").strip()
     parts = text.split(maxsplit=1)
     return parts[1].strip() if len(parts) > 1 else ""
 
 
+def _user(update: Update) -> dict:
+    return store.get_user(update.effective_user.id) or {}
+
+
+async def _require_creds(update: Update):
+    """Devolve credenciais válidas ou pede para conectar (e retorna None)."""
+    message = update.effective_message
+    user = _user(update)
+    if not user.get("refresh_token"):
+        await message.reply_text(
+            "🔒 Você ainda não conectou o seu Google Calendar.\n"
+            "Envie /conectar para autorizar o acesso.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return None
+    try:
+        return await asyncio.to_thread(auth.credentials_for, user)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Falha ao obter credenciais: %s", exc)
+        await message.reply_text(
+            "❌ Não consegui acessar sua conta Google. Envie /conectar novamente.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return None
+
+
+async def _fetch_events(creds, start: datetime, end: datetime, limit: int = 50):
+    return await asyncio.to_thread(calendar_service.list_events, creds, start, end, limit)
+
+
 def _format_event(event: calendar_service.Event, *, with_id: bool = False) -> str:
+    when = event.start.strftime("%d/%m")
     if event.all_day:
-        when = event.start.strftime("%d/%m")
         title = f"{when} ({_weekday_abbr(event.start)}) • {event.summary} (dia inteiro)"
     else:
-        when = event.start.strftime("%d/%m")
-        title = f"{when} ({_weekday_abbr(event.start)}) às {event.start.strftime('%H:%M')} • {event.summary}"
+        title = (
+            f"{when} ({_weekday_abbr(event.start)}) às {event.start.strftime('%H:%M')} "
+            f"• {event.summary}"
+        )
     if event.location:
         title += f" — 📍 {event.location}"
     if with_id:
@@ -83,33 +93,27 @@ def _format_event(event: calendar_service.Event, *, with_id: bool = False) -> st
     return title
 
 
-async def _fetch_events(start: datetime, end: datetime, limit: int = 50):
-    return await asyncio.to_thread(calendar_service.list_events, start, end, limit)
-
-
 # --- comandos ----------------------------------------------------------------
-@restricted
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = _user(update)
+    conectado = "✅ conta conectada" if user.get("refresh_token") else "❌ ainda não conectada"
     await update.effective_message.reply_text(
-        "👋 *Sua agenda pessoal no Telegram*\n\n"
-        "Eu leio e escrevo no seu *Google Calendar* e te aviso antes de cada compromisso.\n\n"
+        "👋 *Agenda no Telegram*\n\n"
+        f"Status do Google: {conectado}\n\n"
+        "*1º passo — conectar sua conta:*\n"
+        "• `/conectar` — autoriza seu Google Calendar\n\n"
         "*Criar evento:*\n"
         "• `/novo Dentista amanhã às 14h`\n"
-        "• ou só escreva: `Reunião com João sexta 10:30`\n\n"
+        "• ou só escreva: `Reunião sexta 10:30`\n\n"
         "*Consultar:*\n"
-        "• `/hoje` — agenda de hoje\n"
-        "• `/amanha` — agenda de amanhã\n"
-        "• `/semana` — próximos 7 dias\n"
-        "• `/proximos 10` — próximos compromissos\n\n"
+        "• `/hoje` · `/amanha` · `/semana` · `/proximos 10`\n\n"
         "*Gerenciar:*\n"
-        "• `/cancelar` — lista e cancela um evento\n"
-        "• `/limpar_dia amanhã` — apaga os eventos de um dia\n"
-        "• `/limpar_tudo` — apaga todos os eventos futuros (com confirmação)\n"
-        "• `/autolimpar on|off` — limpa esta conversa automaticamente\n"
-        "• `/lembrete 60` — avisar X minutos antes\n"
-        "• `/diario 08:00` — horário do aviso de eventos de dia inteiro\n"
-        "• `/id` — mostra seu ID do Telegram\n"
-        "• `/status` — configuração atual\n\n"
+        "• `/cancelar` — cancela um evento\n"
+        "• `/limpar_dia amanhã` — apaga o dia\n"
+        "• `/limpar_tudo` — apaga tudo (com confirmação)\n"
+        "• `/lembrete 60` — avisar X min antes\n"
+        "• `/autolimpar on|off` — limpar a conversa\n"
+        "• `/desconectar` · `/status` · `/id`\n\n"
         "Digite `/ajuda` para ver isto de novo.",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -118,42 +122,93 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 cmd_help = cmd_start
 
 
-@restricted
-async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    chat = update.effective_chat
+async def cmd_conectar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user_tg = update.effective_user
+    record = store.get_user(user_tg.id) or {}
+
+    if not (config.GOOGLE_CLIENT_ID and config.GOOGLE_CLIENT_SECRET):
+        await message.reply_text(
+            "⚙️ O bot ainda está sendo configurado pelo administrador. Tente mais tarde."
+        )
+        return
+
+    # Garante que o usuário existe no banco.
+    store.update_user(
+        user_tg.id,
+        username=user_tg.username or "",
+        first_name=user_tg.first_name or "",
+    )
+    if not record:
+        record = store.get_user(user_tg.id) or {}
+
+    if record.get("refresh_token"):
+        await message.reply_text(
+            f"✅ Sua conta Google já está conectada"
+            + (f" (`{record.get('email')}`)." if record.get("email") else ".")
+            + "\nPara trocar, use /desconectar e depois /conectar.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    link = web.create_connect_link(user_tg.id)
+    await message.reply_text(
+        "🔗 *Conectar seu Google Calendar*\n\n"
+        "Clique no link abaixo, faça login e autorize:\n"
+        f"{link}\n\n"
+        "_O link vale por 15 minutos. Depois volte aqui._",
+        parse_mode=ParseMode.MARKDOWN,
+        disable_web_page_preview=True,
+    )
+
+
+async def cmd_desconectar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    auth.invalidate(uid)
+    store.update_user(uid, refresh_token=None, access_token=None, email=None)
     await update.effective_message.reply_text(
-        f"👤 Seu ID de usuário: `{user.id}`\n"
-        f"💬 ID do chat: `{chat.id}`\n\n"
-        "Coloque seu ID de usuário em `ALLOWED_TELEGRAM_IDS` no arquivo `.env`.",
+        "🔌 Sua conta Google foi desconectada. Use /conectar para reconectar."
+    )
+
+
+async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    u = update.effective_user
+    await update.effective_message.reply_text(
+        f"👤 Seu ID: `{u.id}`\n💬 Chat: `{update.effective_chat.id}`",
         parse_mode=ParseMode.MARKDOWN,
     )
 
 
-@restricted
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    lead = db.get_setting("reminder_lead_minutes", str(config.REMINDER_LEAD_MINUTES))
-    all_day = db.get_setting("all_day_reminder_time", config.ALL_DAY_REMINDER_TIME)
-    text = (
-        "⚙️ *Configuração atual*\n"
-        f"• Calendário: `{config.GOOGLE_CALENDAR_ID}`\n"
-        f"• Fuso: `{config.TIMEZONE}`\n"
+    user = _user(update)
+    lead = user.get("lead_minutes") or config.REMINDER_LEAD_MINUTES
+    all_day = user.get("all_day_time") or config.ALL_DAY_REMINDER_TIME
+    auto = "ligada" if user.get("autoclean", "1") == "1" else "desligada"
+    conectado = f"`{user.get('email')}`" if user.get("refresh_token") else "_não conectado_"
+    await update.effective_message.reply_text(
+        "⚙️ *Sua configuração*\n"
+        f"• Google: {conectado}\n"
         f"• Aviso: *{lead} min* antes\n"
-        f"• Eventos de dia inteiro: aviso às *{all_day}*\n"
-        f"• Duração padrão: *{config.DEFAULT_EVENT_DURATION_MIN} min*"
+        f"• Dia inteiro: aviso às *{all_day}*\n"
+        f"• Limpeza da conversa: *{auto}*",
+        parse_mode=ParseMode.MARKDOWN,
     )
-    await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
-@restricted
 async def cmd_novo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _create_event(update, _payload(update))
 
 
-@restricted
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Qualquer texto que não seja comando vira um novo evento."""
-    await _create_event(update, (update.effective_message.text or "").strip())
+    text = (update.effective_message.text or "").strip()
+    if not text:
+        return
+    if not _user(update).get("refresh_token"):
+        await update.effective_message.reply_text(
+            "🔒 Conecte seu Google primeiro com /conectar."
+        )
+        return
+    await _create_event(update, text)
 
 
 async def _create_event(update: Update, text: str) -> None:
@@ -165,6 +220,10 @@ async def _create_event(update: Update, text: str) -> None:
         )
         return
 
+    creds = await _require_creds(update)
+    if creds is None:
+        return
+
     parsed = parse_event_text(
         text,
         timezone=config.TIMEZONE,
@@ -174,8 +233,7 @@ async def _create_event(update: Update, text: str) -> None:
     if parsed is None:
         await message.reply_text(
             "🤔 Não consegui identificar a data/hora.\n"
-            "Tente algo como: `/novo Dentista amanhã às 14h` ou "
-            "`/novo Almoço 12/10 12:30`.",
+            "Tente: `/novo Dentista amanhã às 14h` ou `/novo Almoço 12/10 12:30`.",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
@@ -183,12 +241,9 @@ async def _create_event(update: Update, text: str) -> None:
     await message.chat.send_action("typing")
     try:
         event = await asyncio.to_thread(
-            calendar_service.create_event,
-            parsed.title,
-            parsed.start,
-            parsed.end,
+            calendar_service.create_event, creds, parsed.title, parsed.start, parsed.end
         )
-    except Exception as exc:  # inclui CalendarError
+    except Exception as exc:  # noqa: BLE001
         logger.exception("Erro ao criar evento")
         await message.reply_text(
             f"❌ Não consegui criar o evento.\n`{type(exc).__name__}: {exc}`",
@@ -196,32 +251,33 @@ async def _create_event(update: Update, text: str) -> None:
         )
         return
 
+    lead = _user(update).get("lead_minutes") or config.REMINDER_LEAD_MINUTES
     await message.reply_text(
         "✅ *Evento criado!*\n"
         f"📌 {event.summary}\n"
         f"🗓 {event.start.strftime('%d/%m/%Y às %H:%M')}\n"
-        f"⏳ Aviso {db.get_setting('reminder_lead_minutes', str(config.REMINDER_LEAD_MINUTES))} min antes.",
+        f"⏳ Aviso {lead} min antes.",
         parse_mode=ParseMode.MARKDOWN,
     )
 
 
 async def _list_range(update: Update, start: datetime, end: datetime, header: str) -> None:
     message = update.effective_message
+    creds = await _require_creds(update)
+    if creds is None:
+        return
     await message.chat.send_action("typing")
     try:
-        events = await _fetch_events(start, end)
-    except Exception as exc:  # inclui CalendarError
-        logger.exception("Erro no Google Calendar")
+        events = await _fetch_events(creds, start, end)
+    except Exception as exc:  # noqa: BLE001
         await message.reply_text(
-            f"❌ Erro ao falar com o Google Calendar.\n`{type(exc).__name__}: {exc}`",
+            f"❌ Erro ao consultar a agenda.\n`{type(exc).__name__}: {exc}`",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
-
     if not events:
         await message.reply_text(f"{header}\n\n_Nenhum compromisso._", parse_mode=ParseMode.MARKDOWN)
         return
-
     lines = [header, ""]
     current_day = None
     for event in events:
@@ -233,87 +289,68 @@ async def _list_range(update: Update, start: datetime, end: datetime, header: st
     await message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 
-@restricted
 async def cmd_hoje(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     now = datetime.now(_tz())
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     await _list_range(update, start, start + timedelta(days=1), "📅 *Hoje*")
 
 
-@restricted
 async def cmd_amanha(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     now = datetime.now(_tz())
     start = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
     await _list_range(update, start, start + timedelta(days=1), "📅 *Amanhã*")
 
 
-@restricted
 async def cmd_semana(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     now = datetime.now(_tz())
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     await _list_range(update, start, start + timedelta(days=7), "📅 *Próximos 7 dias*")
 
 
-@restricted
 async def cmd_proximos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     payload = _payload(update)
     limit = int(payload) if payload.isdigit() else 10
     limit = max(1, min(limit, 50))
     now = datetime.now(_tz())
-    await _list_range(
-        update, now, now + timedelta(days=365), f"📅 *Próximos {limit} compromissos*"
-    )
+    await _list_range(update, now, now + timedelta(days=365), f"📅 *Próximos {limit} compromissos*")
 
 
-@restricted
 async def cmd_cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
+    creds = await _require_creds(update)
+    if creds is None:
+        return
     payload = _payload(update)
 
     if not payload:
         now = datetime.now(_tz())
         try:
-            events = await _fetch_events(now, now + timedelta(days=60), 20)
-        except calendar_service.CalendarError as exc:
+            events = await _fetch_events(creds, now, now + timedelta(days=60), 20)
+        except Exception as exc:  # noqa: BLE001
             await message.reply_text(f"❌ {exc}")
             return
         if not events:
             await message.reply_text("Não há eventos futuros para cancelar.")
             return
-        lines = [
-            "🗑 *Para cancelar*, envie `/cancelar ` seguido do código do evento:",
-            "",
-        ]
-        for event in events:
-            lines.append(_format_event(event, with_id=True))
+        lines = ["🗑 *Para cancelar*, envie `/cancelar ` + código:", ""]
+        lines += [_format_event(e, with_id=True) for e in events]
         lines.append("\nEx.: `/cancelar abc123...`")
         await message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
         return
 
     try:
-        event = await asyncio.to_thread(calendar_service.find_event_by_prefix, payload)
-    except Exception as exc:  # inclui CalendarError
-        logger.exception("Erro no Google Calendar")
-        await message.reply_text(
-            f"❌ Erro ao falar com o Google Calendar.\n`{type(exc).__name__}: {exc}`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        event = await asyncio.to_thread(calendar_service.find_event_by_prefix, creds, payload)
+    except Exception as exc:  # noqa: BLE001
+        await message.reply_text(f"❌ {exc}")
         return
-
     if event is None:
         await message.reply_text("❌ Não encontrei nenhum evento com esse código.")
         return
-
     try:
-        await asyncio.to_thread(calendar_service.delete_event, event.id)
-    except Exception as exc:  # inclui CalendarError
-        logger.exception("Erro no Google Calendar")
-        await message.reply_text(
-            f"❌ Erro ao falar com o Google Calendar.\n`{type(exc).__name__}: {exc}`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await asyncio.to_thread(calendar_service.delete_event, creds, event.id)
+    except Exception as exc:  # noqa: BLE001
+        await message.reply_text(f"❌ {exc}")
         return
-
     await message.reply_text(
         f"🗑 Evento cancelado: *{event.summary}* "
         f"({event.start.strftime('%d/%m/%Y às %H:%M')}).",
@@ -321,188 +358,146 @@ async def cmd_cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
-@restricted
-async def cmd_lembrete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    payload = _payload(update)
-    if not payload.isdigit():
-        atual = db.get_setting("reminder_lead_minutes", str(config.REMINDER_LEAD_MINUTES))
-        await update.effective_message.reply_text(
-            f"⏰ Aviso atual: *{atual} minutos* antes.\n"
-            "Para mudar: `/lembrete 60`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-    minutes = max(0, min(int(payload), 24 * 60))
-    db.set_setting("reminder_lead_minutes", str(minutes))
-    await update.effective_message.reply_text(
-        f"✅ Agora vou avisar *{minutes} minutos* antes de cada compromisso.",
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
-
-@restricted
-async def cmd_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    payload = _payload(update)
-    if ":" not in payload:
-        atual = db.get_setting("all_day_reminder_time", config.ALL_DAY_REMINDER_TIME)
-        await update.effective_message.reply_text(
-            f"🗓 Aviso de eventos de dia inteiro: *{atual}*.\n"
-            "Para mudar: `/diario 07:30`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-    try:
-        hour, minute = (int(part) for part in payload.split(":", 1))
-        assert 0 <= hour <= 23 and 0 <= minute <= 59
-    except (ValueError, AssertionError):
-        await update.effective_message.reply_text("Horário inválido. Use algo como `/diario 08:00`.")
-        return
-    value = f"{hour:02d}:{minute:02d}"
-    db.set_setting("all_day_reminder_time", value)
-    await update.effective_message.reply_text(
-        f"✅ Eventos de dia inteiro serão avisados às *{value}*.",
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
-
-@restricted
 async def cmd_limpar_dia(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Apaga todos os eventos de um dia específico."""
     message = update.effective_message
+    creds = await _require_creds(update)
+    if creds is None:
+        return
     payload = _payload(update)
     if not payload:
         await message.reply_text(
-            "🗓 Use assim: `/limpar_dia amanhã` ou `/limpar_dia 25/12`.",
+            "🗓 Use: `/limpar_dia amanhã` ou `/limpar_dia 25/12`.",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
-
     day = parse_day(payload, timezone=config.TIMEZONE)
     if day is None:
         await message.reply_text(
-            "🤔 Não entendi a data. Tente: `/limpar_dia 25/12` ou `/limpar_dia amanhã`.",
+            "🤔 Não entendi a data. Tente `/limpar_dia 25/12`.",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
-
     tz = _tz()
     start = datetime(day.year, day.month, day.day, tzinfo=tz)
     end = start + timedelta(days=1)
-
     await message.chat.send_action("typing")
     try:
-        events = await asyncio.to_thread(
-            calendar_service.list_events, start, end, 250
-        )
+        events = await asyncio.to_thread(calendar_service.list_events, creds, start, end, 250)
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Erro ao listar eventos do dia")
-        await message.reply_text(
-            f"❌ Erro ao consultar a agenda.\n`{type(exc).__name__}: {exc}`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await message.reply_text(f"❌ {exc}")
         return
-
     if not events:
-        await message.reply_text(
-            f"Não há eventos em *{day.strftime('%d/%m/%Y')}*.", parse_mode=ParseMode.MARKDOWN
-        )
+        await message.reply_text(f"Não há eventos em *{day.strftime('%d/%m/%Y')}*.", parse_mode=ParseMode.MARKDOWN)
         return
-
-    deleted, failed = await asyncio.to_thread(calendar_service.delete_events, events)
+    deleted, failed = await asyncio.to_thread(calendar_service.delete_events, creds, events)
     texto = f"🗑 Apaguei *{deleted}* evento(s) de *{day.strftime('%d/%m/%Y')}*."
     if failed:
         texto += f"\n⚠️ {failed} não puderam ser apagados."
     await message.reply_text(texto, parse_mode=ParseMode.MARKDOWN)
 
 
-@restricted
 async def cmd_limpar_tudo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Apaga TODOS os eventos futuros (exige confirmação)."""
     message = update.effective_message
+    creds = await _require_creds(update)
+    if creds is None:
+        return
     payload = _payload(update).strip().lower()
     tz = _tz()
     now = datetime.now(tz)
     limite = now + timedelta(days=3650)
-
     confirmado = payload in {"confirmar", "confirmo", "sim", "confirma", "yes"}
-    if not confirmado:
-        await message.chat.send_action("typing")
-        try:
-            events = await asyncio.to_thread(
-                calendar_service.list_all_events, now, limite
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Erro ao listar todos os eventos")
-            await message.reply_text(
-                f"❌ Erro ao consultar a agenda.\n`{type(exc).__name__}: {exc}`",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            return
-        if not events:
-            await message.reply_text("Não há eventos futuros para apagar.")
-            return
-        await message.reply_text(
-            f"⚠️ Isso vai *apagar {len(events)} evento(s)* a partir de agora "
-            "(incluindo de hoje).\n\nTem certeza? Para confirmar, envie:\n"
-            f"`/limpar_tudo confirmar`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
 
     await message.chat.send_action("typing")
     try:
-        events = await asyncio.to_thread(calendar_service.list_all_events, now, limite)
+        events = await asyncio.to_thread(calendar_service.list_all_events, creds, now, limite)
     except Exception as exc:  # noqa: BLE001
-        await message.reply_text(
-            f"❌ Erro ao consultar a agenda.\n`{type(exc).__name__}: {exc}`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await message.reply_text(f"❌ {exc}")
         return
-
     if not events:
         await message.reply_text("Não há eventos futuros para apagar.")
         return
-
-    deleted, failed = await asyncio.to_thread(calendar_service.delete_events, events)
+    if not confirmado:
+        await message.reply_text(
+            f"⚠️ Isso vai *apagar {len(events)} evento(s)* a partir de agora.\n\n"
+            "Para confirmar, envie: `/limpar_tudo confirmar`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    deleted, failed = await asyncio.to_thread(calendar_service.delete_events, creds, events)
     texto = f"🗑 Apaguei *{deleted}* evento(s) futuros."
     if failed:
         texto += f"\n⚠️ {failed} não puderam ser apagados."
     await message.reply_text(texto, parse_mode=ParseMode.MARKDOWN)
 
 
-@restricted
+async def cmd_lembrete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    payload = _payload(update)
+    uid = update.effective_user.id
+    user = _user(update)
+    if not payload.isdigit():
+        atual = user.get("lead_minutes") or config.REMINDER_LEAD_MINUTES
+        await update.effective_message.reply_text(
+            f"⏰ Aviso atual: *{atual} minutos* antes.\nPara mudar: `/lembrete 60`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    minutes = max(0, min(int(payload), 24 * 60))
+    store.update_user(uid, lead_minutes=minutes)
+    await update.effective_message.reply_text(
+        f"✅ Vou avisar *{minutes} minutos* antes.", parse_mode=ParseMode.MARKDOWN
+    )
+
+
+async def cmd_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    payload = _payload(update)
+    uid = update.effective_user.id
+    user = _user(update)
+    if ":" not in payload:
+        atual = user.get("all_day_time") or config.ALL_DAY_REMINDER_TIME
+        await update.effective_message.reply_text(
+            f"🗓 Aviso de dia inteiro: *{atual}*. Para mudar: `/diario 07:30`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    try:
+        hour, minute = (int(p) for p in payload.split(":", 1))
+        assert 0 <= hour <= 23 and 0 <= minute <= 59
+    except (ValueError, AssertionError):
+        await update.effective_message.reply_text("Horário inválido. Use `/diario 08:00`.")
+        return
+    value = f"{hour:02d}:{minute:02d}"
+    store.update_user(uid, all_day_time=value)
+    await update.effective_message.reply_text(f"✅ Avisos de dia inteiro às *{value}*.", parse_mode=ParseMode.MARKDOWN)
+
+
 async def cmd_autolimpar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Liga/desliga a limpeza automática da conversa."""
     payload = _payload(update).strip().lower()
+    uid = update.effective_user.id
+    user = _user(update)
     ligar = {"on", "ligar", "ativar", "sim", "1", "true"}
     desligar = {"off", "desligar", "desativar", "nao", "não", "0", "false"}
-
     if payload in ligar:
-        chat_cleaner.set_enabled(True)
+        store.update_user(uid, autoclean="1")
         await update.effective_message.reply_text(
-            f"🧹 Limpeza automática *ATIVADA* (a cada {config.AUTOCLEAN_MINUTES} min).",
+            f"🧹 Limpeza da conversa *ATIVADA* (a cada {config.AUTOCLEAN_MINUTES} min).",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
     if payload in desligar:
-        chat_cleaner.set_enabled(False)
+        store.update_user(uid, autoclean="0")
         await update.effective_message.reply_text(
-            "🧹 Limpeza automática *DESATIVADA*. A conversa não será mais apagada.",
-            parse_mode=ParseMode.MARKDOWN,
+            "🧹 Limpeza *DESATIVADA*.", parse_mode=ParseMode.MARKDOWN
         )
         return
-
-    estado = "ATIVADA" if chat_cleaner.is_enabled() else "DESATIVADA"
+    estado = "ATIVADA" if user.get("autoclean", "1") == "1" else "DESATIVADA"
     await update.effective_message.reply_text(
-        f"🧹 Limpeza automática está *{estado}* (a cada {config.AUTOCLEAN_MINUTES} min).\n"
+        f"🧹 Limpeza da conversa está *{estado}* (a cada {config.AUTOCLEAN_MINUTES} min).\n"
         "Para mudar: `/autolimpar on` ou `/autolimpar off`.",
         parse_mode=ParseMode.MARKDOWN,
     )
 
 
-@restricted
 async def cmd_erro(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
-        "Não reconheci esse comando. Use `/ajuda` para ver o que eu sei fazer.",
-        parse_mode=ParseMode.MARKDOWN,
+        "Não reconheci esse comando. Use `/ajuda`.", parse_mode=ParseMode.MARKDOWN
     )

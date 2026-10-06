@@ -1,4 +1,4 @@
-"""Verificação periódica da agenda e envio de lembretes no Telegram."""
+"""Verificação periódica da agenda de TODOS os usuários e envio de lembretes."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from zoneinfo import ZoneInfo
 
 from telegram.ext import ContextTypes
 
-from .. import config, db
-from . import calendar_service
+from .. import config, db, store
+from . import auth, calendar_service
 
 logger = logging.getLogger(__name__)
 
@@ -19,31 +19,13 @@ def _tz() -> ZoneInfo:
     return ZoneInfo(config.TIMEZONE)
 
 
-def _lead_minutes() -> int:
-    raw = db.get_setting("reminder_lead_minutes", str(config.REMINDER_LEAD_MINUTES))
-    try:
-        return max(0, int(raw))
-    except (TypeError, ValueError):
-        return config.REMINDER_LEAD_MINUTES
-
-
-def _all_day_reminder_time() -> time:
-    raw = db.get_setting("all_day_reminder_time", config.ALL_DAY_REMINDER_TIME)
-    try:
-        hour, minute = (int(part) for part in raw.split(":"))
-        return time(hour=hour, minute=minute)
-    except (ValueError, AttributeError):
-        return time(hour=8, minute=0)
-
-
 def format_reminder(event: calendar_service.Event) -> str:
     if event.all_day:
         when = event.start.strftime("%d/%m/%Y")
-        lines = [f"📌 *Hoje* é o dia de:", f"*{event.summary}*", f"🗓 {when} (dia inteiro)"]
+        lines = ["📌 *Hoje* é o dia de:", f"*{event.summary}*", f"🗓 {when} (dia inteiro)"]
     else:
         when = event.start.strftime("%d/%m/%Y às %H:%M")
         lines = ["⏰ *Lembrete*", f"*{event.summary}*", f"🗓 {when}"]
-
     if event.location:
         lines.append(f"📍 {event.location}")
     if event.description:
@@ -54,72 +36,83 @@ def format_reminder(event: calendar_service.Event) -> str:
     return "\n".join(lines)
 
 
-async def _broadcast(context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
-    for chat_id in config.ALLOWED_TELEGRAM_IDS:
-        try:
-            await context.bot.send_message(
-                chat_id=chat_id, text=text, parse_mode="Markdown",
-                disable_web_page_preview=True,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("Falha ao enviar lembrete para %s", chat_id)
+async def _send(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id, text=text, parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("Falha ao enviar lembrete para %s", chat_id)
+
+
+def _parse_time(value: str | None) -> time:
+    try:
+        hour, minute = (int(p) for p in (value or config.ALL_DAY_REMINDER_TIME).split(":"))
+        return time(hour=hour, minute=minute)
+    except (ValueError, AttributeError):
+        return time(hour=8, minute=0)
 
 
 async def check_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Job periódico: avisa sobre eventos que começam dentro da antecedência."""
     tz = _tz()
     now = datetime.now(tz)
-    lead = timedelta(minutes=_lead_minutes())
     slack = timedelta(seconds=config.REMINDER_CHECK_INTERVAL_SECONDS)
 
-    try:
-        events = await asyncio.to_thread(
-            calendar_service.list_events,
-            now - timedelta(minutes=1),
-            now + lead + slack,
-        )
-    except calendar_service.CalendarError as exc:
-        logger.warning("Lembrete adiado: %s", exc)
-        return
-
-    for event in events:
-        if event.all_day:
-            await _maybe_remind_all_day(context, event, now)
+    users = await asyncio.to_thread(store.all_users)
+    for tid, record in users.items():
+        if not record.get("refresh_token"):
+            continue
+        try:
+            creds = await asyncio.to_thread(auth.credentials_for, record)
+        except Exception:  # noqa: BLE001
+            logger.info("Usuário %s sem credenciais válidas; pulando.", tid)
             continue
 
-        if event.start < now or event.start > now + lead:
+        lead = timedelta(minutes=int(record.get("lead_minutes") or config.REMINDER_LEAD_MINUTES))
+        try:
+            events = await asyncio.to_thread(
+                calendar_service.list_events,
+                creds,
+                now - timedelta(minutes=1),
+                now + lead + slack,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Erro ao consultar agenda do usuário %s: %s", tid, exc)
             continue
 
-        key_iso = event.start.isoformat()
-        if await asyncio.to_thread(db.reminder_already_sent, event.id, key_iso):
-            continue
-
-        await _broadcast(context, format_reminder(event))
-        await asyncio.to_thread(db.mark_reminder_sent, event.id, key_iso)
-        logger.info("Lembrete enviado: %s (%s)", event.summary, key_iso)
+        for event in events:
+            if event.all_day:
+                await _maybe_remind_all_day(context, int(tid), record, event, now)
+                continue
+            if event.start < now or event.start > now + lead:
+                continue
+            key = event.start.isoformat()
+            if await asyncio.to_thread(db.reminder_already_sent, event.id, key):
+                continue
+            await _send(context, int(tid), format_reminder(event))
+            await asyncio.to_thread(db.mark_reminder_sent, event.id, key)
 
 
 async def _maybe_remind_all_day(
     context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    record: dict,
     event: calendar_service.Event,
     now: datetime,
 ) -> None:
-    """Eventos de dia inteiro são avisados no horário configurado (padrão 08:00)."""
     if event.start.date() != now.date():
         return
-    target = _all_day_reminder_time()
+    target = _parse_time(record.get("all_day_time"))
     reminder_at = datetime.combine(now.date(), target, tzinfo=now.tzinfo)
     if now < reminder_at or now - reminder_at > timedelta(minutes=5):
         return
-
-    key_iso = event.start.isoformat()
-    if await asyncio.to_thread(db.reminder_already_sent, event.id, key_iso):
+    key = event.start.isoformat()
+    if await asyncio.to_thread(db.reminder_already_sent, event.id, key):
         return
-
-    await _broadcast(context, format_reminder(event))
-    await asyncio.to_thread(db.mark_reminder_sent, event.id, key_iso)
+    await _send(context, chat_id, format_reminder(event))
+    await asyncio.to_thread(db.mark_reminder_sent, event.id, key)
 
 
 async def cleanup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Remove registros de lembretes antigos uma vez por dia."""
     await asyncio.to_thread(db.cleanup_old_reminders, 60)

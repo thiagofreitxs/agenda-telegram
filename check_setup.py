@@ -1,18 +1,13 @@
-"""Verifica se o projeto está pronto para rodar.
+"""Verifica se o bot multiusuário está configurado corretamente.
 
-Uso:
-    .venv\\Scripts\\python.exe check_setup.py
-    .venv\\Scripts\\python.exe check_setup.py --google   (testa de verdade a agenda)
+Uso:  .venv\\Scripts\\python.exe check_setup.py
 """
 
 from __future__ import annotations
 
-import argparse
-import os
 import sys
-from datetime import datetime, timedelta
 
-from app import config
+from app import config, store
 
 OK = "[OK]"
 WARN = "[!!]"
@@ -23,105 +18,58 @@ def _line(status: str, texto: str) -> None:
     print(f" {status}  {texto}")
 
 
-def check_env() -> bool:
-    print("\n== Configuracao do .env ==")
-    tudo_ok = True
-
-    if os.path.exists(".env"):
-        _line(OK, "Arquivo .env encontrado.")
-    else:
-        _line(WARN, "Nao existe .env (copie de .env.example).")
-        tudo_ok = False
-
-    token = config.TELEGRAM_BOT_TOKEN
-    if token and ":" in token and len(token) > 30 and "Exemplo" not in token:
-        _line(OK, f"TELEGRAM_BOT_TOKEN preenchido ({token[:10]}...).")
-    else:
-        _line(FAIL, "TELEGRAM_BOT_TOKEN ausente ou ainda com o valor de exemplo.")
-        tudo_ok = False
-
-    if config.ALLOWED_TELEGRAM_IDS and config.ALLOWED_TELEGRAM_IDS != {123456789}:
-        _line(OK, f"ALLOWED_TELEGRAM_IDS: {sorted(config.ALLOWED_TELEGRAM_IDS)}")
-    else:
-        _line(FAIL, "ALLOWED_TELEGRAM_IDS vazio ou ainda com o exemplo (123456789). "
-                    "Envie /id ao bot para descobrir o seu.")
-        tudo_ok = False
-
-    _line(OK, f"TIMEZONE: {config.TIMEZONE}")
-    _line(OK, f"Calendario alvo: {config.GOOGLE_CALENDAR_ID}")
-    return tudo_ok
-
-
-def check_google() -> bool:
-    print("\n== Credenciais do Google ==")
-    fontes = []
-    if config.GOOGLE_TOKEN_JSON:
-        fontes.append("GOOGLE_TOKEN_JSON (variavel)")
-    if os.path.exists(config.GOOGLE_TOKEN_FILE):
-        fontes.append(config.GOOGLE_TOKEN_FILE)
-    if config.GOOGLE_SERVICE_ACCOUNT_JSON:
-        fontes.append("GOOGLE_SERVICE_ACCOUNT_JSON (variavel)")
-    if config.GOOGLE_SERVICE_ACCOUNT_FILE and os.path.exists(
-        config.GOOGLE_SERVICE_ACCOUNT_FILE
-    ):
-        fontes.append(config.GOOGLE_SERVICE_ACCOUNT_FILE)
-
-    if not fontes:
-        _line(FAIL, "Nenhuma credencial encontrada.")
-        _line(OK, "Rode:  python authorize_google.py")
-        return False
-
-    _line(OK, "Credencial presente: " + ", ".join(fontes))
-    from app.services import calendar_service as cs
-
-    try:
-        cs._load_credentials()
-        _line(OK, "Credencial carregada com sucesso.")
-        return True
-    except cs.CalendarError as exc:
-        _line(FAIL, f"Erro ao carregar credencial: {exc}")
-        return False
-
-
-def check_google_live() -> bool:
-    print("\n== Teste real no Google Calendar ==")
-    from app.services import calendar_service as cs
-
-    agora = datetime.now()
-    try:
-        eventos = cs.list_events(agora, agora + timedelta(days=7), 10)
-    except cs.CalendarError as exc:
-        _line(FAIL, f"Falha ao consultar a agenda: {exc}")
-        return False
-    _line(OK, f"Conexao OK. {len(eventos)} evento(s) nos proximos 7 dias.")
-    for evento in eventos[:5]:
-        _line(OK, f"  - {evento.start:%d/%m %H:%M} {evento.summary}")
-    return True
-
-
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Verifica a configuracao da agenda.")
-    parser.add_argument(
-        "--google", action="store_true", help="Faz uma chamada real ao Google Calendar."
-    )
-    args = parser.parse_args()
-
-    print("=" * 55)
-    print(" VERIFICACAO DO SETUP - AGENDA TELEGRAM + GOOGLE")
-    print("=" * 55)
+    print("=" * 60)
+    print(" VERIFICACAO - AGENDA MULTIUSUARIO")
+    print("=" * 60)
     print(f" Python: {sys.version.split()[0]}")
 
-    env_ok = check_env()
-    google_ok = check_google()
+    ok = True
 
-    if args.google and google_ok:
-        check_google_live()
+    print("\n== Telegram ==")
+    if config.TELEGRAM_BOT_TOKEN and "Exemplo" not in config.TELEGRAM_BOT_TOKEN:
+        _line(OK, "TELEGRAM_BOT_TOKEN preenchido.")
+    else:
+        _line(FAIL, "TELEGRAM_BOT_TOKEN ausente.")
+        ok = False
 
-    print("\n" + "=" * 55)
-    if env_ok and google_ok:
-        print(" TUDO PRONTO! Inicie com:  python -m app.main")
+    print("\n== OAuth do Google (por usuario) ==")
+    if config.GOOGLE_CLIENT_ID and config.GOOGLE_CLIENT_SECRET:
+        _line(OK, "GOOGLE_CLIENT_ID / SECRET preenchidos.")
+    else:
+        _line(FAIL, "GOOGLE_CLIENT_ID / SECRET ausentes.")
+        ok = False
+    _line(OK, f"URL publica: {config.APP_BASE_URL}")
+    _line(OK, f"Redirect URI: {config.redirect_uri()}")
+    print("       (cadastre exatamente esta URL no cliente OAuth 'Aplicacao Web')")
+    if config.GOOGLE_CLIENT_ID and config.GOOGLE_CLIENT_SECRET:
+        try:
+            from app.services import google_oauth
+
+            url = google_oauth.authorization_url("teste")
+            _line(OK, f"URL de autorizacao gerada ({len(url)} chars).")
+        except Exception as exc:  # noqa: BLE001
+            _line(FAIL, f"Erro ao gerar URL de autorizacao: {exc}")
+            ok = False
+
+    print("\n== Banco de dados (GitHub) ==")
+    if config.GITHUB_DATA_REPO and config.GITHUB_DATA_TOKEN:
+        _line(OK, f"Repositorio: {config.GITHUB_DATA_REPO}/{config.GITHUB_DATA_PATH}")
+        try:
+            users = store.all_users()
+            _line(OK, f"Conexao OK. {len(users)} usuario(s) cadastrado(s).")
+        except Exception as exc:  # noqa: BLE001
+            _line(FAIL, f"Falha ao acessar o banco: {exc}")
+            ok = False
+    else:
+        _line(FAIL, "GITHUB_DATA_REPO / GITHUB_DATA_TOKEN ausentes.")
+        ok = False
+
+    print("\n" + "=" * 60)
+    if ok:
+        print(" TUDO PRONTO! Inicie com: python -m app.main")
         return 0
-    print(" Faltam passos. Corrija os itens marcados com [XX] acima.")
+    print(" Faltam passos (itens com [XX]).")
     return 1
 
 

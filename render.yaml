@@ -1,10 +1,4 @@
-# Blueprint do Render (plano GRATUITO).
-# Ao criar um "Blueprint" no Render apontando para este repositório, ele lê este
-# arquivo e configura o serviço automaticamente.
-#
-# Observação: o plano free "dorme" após ~15 min sem acesso. Use um monitor
-# gratuito (UptimeRobot) apontando para a URL do serviço para mantê-lo acordado.
-
+# Blueprint do Render (plano GRATUITO) - versao multiusuario.
 services:
   - type: web
     name: agenda-telegram-bot
@@ -18,14 +12,22 @@ services:
     envVars:
       - key: TIMEZONE
         value: America/Sao_Paulo
-      - key: GOOGLE_CALENDAR_ID
-        value: thiagofbg52@gmail.com
       - key: REMINDER_LEAD_MINUTES
         value: "30"
-      # Valores secretos: o Render vai pedir para preencher ao criar o Blueprint.
+      - key: APP_BASE_URL
+        value: https://agenda-telegram-bot.onrender.com
+      - key: GITHUB_DATA_REPO
+        value: thiagofreitxs/agenda-data
+      # Secretos: preencher no painel do Render.
       - key: TELEGRAM_BOT_TOKEN
         sync: false
-      - key: ALLOWED_TELEGRAM_IDS
+      - key: ADMIN_TELEGRAM_IDS
         sync: false
-      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GITHUB_DATA_TOKEN
+        sync: false
+      - key: APP_ENCRYPTION_KEY
         sync: false

@@ -17,14 +17,16 @@ from telegram.ext import (
     filters,
 )
 
-from . import config, db, handlers
-from .health import self_ping_job, start_health_server
+from . import config, db, handlers, store
 from .services import chat_cleaner
 from .services.reminder_service import check_reminders, cleanup_job
+from .web import self_ping_job, start_web_server
 
 logger = logging.getLogger(__name__)
 
 COMMANDS = [
+    ("start", "Como usar o bot"),
+    ("conectar", "Conectar sua conta do Google"),
     ("novo", "Criar um evento (ex.: /novo Dentista amanhã 14h)"),
     ("hoje", "Agenda de hoje"),
     ("amanha", "Agenda de amanhã"),
@@ -33,10 +35,11 @@ COMMANDS = [
     ("cancelar", "Cancelar um evento"),
     ("limpar_dia", "Apagar os eventos de um dia"),
     ("limpar_tudo", "Apagar todos os eventos futuros"),
-    ("autolimpar", "Ligar/desligar a limpeza da conversa"),
     ("lembrete", "Minutos de antecedência do aviso"),
-    ("diario", "Horário do aviso de eventos de dia inteiro"),
+    ("diario", "Horário do aviso de dia inteiro"),
+    ("autolimpar", "Ligar/desligar a limpeza da conversa"),
     ("status", "Configuração atual"),
+    ("desconectar", "Desconectar sua conta Google"),
     ("id", "Mostrar seu ID do Telegram"),
     ("ajuda", "Como usar o bot"),
 ]
@@ -45,14 +48,13 @@ COMMANDS = [
 async def _post_init(application: Application) -> None:
     db.init_db()
     await application.bot.set_my_commands(
-        [BotCommand(command, description) for command, description in COMMANDS]
+        [BotCommand(c, d) for c, d in COMMANDS]
     )
     me = await application.bot.get_me()
     logger.info("Bot iniciado como @%s", me.username)
 
 
 async def _on_error(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Mostra qualquer erro no chat em vez de ficar em silêncio."""
     logger.error("Erro ao processar uma atualização.", exc_info=context.error)
     if update and update.effective_message:
         try:
@@ -74,6 +76,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("start", handlers.cmd_start))
     app.add_handler(CommandHandler("ajuda", handlers.cmd_help))
     app.add_handler(CommandHandler("help", handlers.cmd_help))
+    app.add_handler(CommandHandler("conectar", handlers.cmd_conectar))
+    app.add_handler(CommandHandler("desconectar", handlers.cmd_desconectar))
     app.add_handler(CommandHandler("id", handlers.cmd_id))
     app.add_handler(CommandHandler("status", handlers.cmd_status))
     app.add_handler(CommandHandler("novo", handlers.cmd_novo))
@@ -82,14 +86,12 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("semana", handlers.cmd_semana))
     app.add_handler(CommandHandler("proximos", handlers.cmd_proximos))
     app.add_handler(CommandHandler("cancelar", handlers.cmd_cancelar))
-    app.add_handler(CommandHandler("lembrete", handlers.cmd_lembrete))
-    app.add_handler(CommandHandler("diario", handlers.cmd_diario))
     app.add_handler(CommandHandler("limpar_dia", handlers.cmd_limpar_dia))
     app.add_handler(CommandHandler("limpar_tudo", handlers.cmd_limpar_tudo))
+    app.add_handler(CommandHandler("lembrete", handlers.cmd_lembrete))
+    app.add_handler(CommandHandler("diario", handlers.cmd_diario))
     app.add_handler(CommandHandler("autolimpar", handlers.cmd_autolimpar))
-    # Registra a última mensagem de cada chat (para a limpeza automática).
     app.add_handler(TypeHandler(Update, chat_cleaner.track_message), group=-1)
-    # Texto livre (sem "/") vira um novo evento automaticamente.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.on_text))
     app.add_handler(MessageHandler(filters.COMMAND, handlers.cmd_erro))
     app.add_error_handler(_on_error)
@@ -100,12 +102,12 @@ def build_application() -> Application:
             check_reminders, interval=config.REMINDER_CHECK_INTERVAL_SECONDS, first=10
         )
         job_queue.run_daily(cleanup_job, time=dtime(3, 0))
-        job_queue.run_repeating(
-            chat_cleaner.autoclean_job,
-            interval=config.AUTOCLEAN_MINUTES * 60,
-            first=60,
-        )
-        # Auto-ping para não dormir (plano grátis do Render).
+        if config.AUTOCLEAN_MINUTES > 0:
+            job_queue.run_repeating(
+                chat_cleaner.autoclean_job,
+                interval=config.AUTOCLEAN_MINUTES * 60,
+                first=60,
+            )
         if os.getenv("RENDER_EXTERNAL_URL"):
             job_queue.run_repeating(self_ping_job, interval=600, first=120)
     else:
@@ -119,12 +121,13 @@ def main() -> None:
         format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
         level=getattr(logging, config.LOG_LEVEL, logging.INFO),
     )
-    # Evita vazar o token nas URLs de requisição nos logs.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+
     for aviso in config.validate():
         logger.warning(aviso)
-    start_health_server()
+
+    start_web_server()
     app = build_application()
     logger.info("Rodando em modo polling. Ctrl+C para parar.")
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
