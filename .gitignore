@@ -26,3 +26,10 @@ env/
 # Sistema
 .DS_Store
 Thumbs.db
+
+# Ferramenta local (automacao)
+.playwright-profile/
+.navegador-perfil/
+erro_automacao.png
+erro_pagina.html
+automacao.log
