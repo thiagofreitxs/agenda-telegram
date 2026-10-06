@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html as _html
 import logging
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -22,24 +23,24 @@ def _tz() -> ZoneInfo:
 def format_reminder(event: calendar_service.Event) -> str:
     if event.all_day:
         when = event.start.strftime("%d/%m/%Y")
-        lines = ["📌 *Hoje* é o dia de:", f"*{event.summary}*", f"🗓 {when} (dia inteiro)"]
+        lines = ["📌 <b>Hoje</b> é o dia de:", f"<b>{_html.escape(event.summary)}</b>", f"🗓 {when} (dia inteiro)"]
     else:
         when = event.start.strftime("%d/%m/%Y às %H:%M")
-        lines = ["⏰ *Lembrete*", f"*{event.summary}*", f"🗓 {when}"]
+        lines = ["⏰ <b>Lembrete</b>", f"<b>{_html.escape(event.summary)}</b>", f"🗓 {when}"]
     if event.location:
-        lines.append(f"📍 {event.location}")
+        lines.append(f"📍 {_html.escape(event.location)}")
     if event.description:
         preview = event.description.strip().splitlines()[0][:200]
-        lines.append(f"📝 {preview}")
+        lines.append(f"📝 {_html.escape(preview)}")
     if event.html_link:
-        lines.append(f"🔗 [Abrir no Google Calendar]({event.html_link})")
+        lines.append(f'🔗 <a href="{_html.escape(event.html_link)}">Abrir no Google Calendar</a>')
     return "\n".join(lines)
 
 
 async def _send(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
     try:
         await context.bot.send_message(
-            chat_id=chat_id, text=text, parse_mode="Markdown",
+            chat_id=chat_id, text=text, parse_mode="HTML",
             disable_web_page_preview=True,
         )
     except Exception:  # noqa: BLE001

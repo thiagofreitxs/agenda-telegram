@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html as _html
 import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -31,6 +32,14 @@ _WEEKDAYS_ABBR = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
 
 def _tz() -> ZoneInfo:
     return ZoneInfo(config.TIMEZONE)
+
+
+def _md(value) -> str:
+    """Escapa caracteres especiais do Markdown legado do Telegram."""
+    text = str(value)
+    for ch in ("\\", "_", "*", "`", "[", "]"):
+        text = text.replace(ch, "\\" + ch)
+    return text
 
 
 def _weekday_full(dt: datetime) -> str:
@@ -80,14 +89,14 @@ async def _fetch_events(creds, start: datetime, end: datetime, limit: int = 50):
 def _format_event(event: calendar_service.Event, *, with_id: bool = False) -> str:
     when = event.start.strftime("%d/%m")
     if event.all_day:
-        title = f"{when} ({_weekday_abbr(event.start)}) • {event.summary} (dia inteiro)"
+        title = f"{when} ({_weekday_abbr(event.start)}) • {_md(event.summary)} (dia inteiro)"
     else:
         title = (
             f"{when} ({_weekday_abbr(event.start)}) às {event.start.strftime('%H:%M')} "
-            f"• {event.summary}"
+            f"• {_md(event.summary)}"
         )
     if event.location:
-        title += f" — 📍 {event.location}"
+        title += f" — 📍 {_md(event.location)}"
     if with_id:
         title += f"\n   `{event.id[:16]}`"
     return title
@@ -153,11 +162,11 @@ async def cmd_conectar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     link = web.create_connect_link(user_tg.id)
     await message.reply_text(
-        "🔗 *Conectar seu Google Calendar*\n\n"
+        "🔗 <b>Conectar seu Google Calendar</b>\n\n"
         "Clique no link abaixo, faça login e autorize:\n"
         f"{link}\n\n"
-        "_O link vale por 15 minutos. Depois volte aqui._",
-        parse_mode=ParseMode.MARKDOWN,
+        "<i>O link vale por 15 minutos. Depois volte aqui.</i>",
+        parse_mode="HTML",
         disable_web_page_preview=True,
     )
 
@@ -246,15 +255,14 @@ async def _create_event(update: Update, text: str) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.exception("Erro ao criar evento")
         await message.reply_text(
-            f"❌ Não consegui criar o evento.\n`{type(exc).__name__}: {exc}`",
-            parse_mode=ParseMode.MARKDOWN,
+            f"❌ Não consegui criar o evento.\n{type(exc).__name__}: {exc}"
         )
         return
 
     lead = _user(update).get("lead_minutes") or config.REMINDER_LEAD_MINUTES
     await message.reply_text(
         "✅ *Evento criado!*\n"
-        f"📌 {event.summary}\n"
+        f"📌 {_md(event.summary)}\n"
         f"🗓 {event.start.strftime('%d/%m/%Y às %H:%M')}\n"
         f"⏳ Aviso {lead} min antes.",
         parse_mode=ParseMode.MARKDOWN,
@@ -271,8 +279,7 @@ async def _list_range(update: Update, start: datetime, end: datetime, header: st
         events = await _fetch_events(creds, start, end)
     except Exception as exc:  # noqa: BLE001
         await message.reply_text(
-            f"❌ Erro ao consultar a agenda.\n`{type(exc).__name__}: {exc}`",
-            parse_mode=ParseMode.MARKDOWN,
+            f"❌ Erro ao consultar a agenda.\n{type(exc).__name__}: {exc}"
         )
         return
     if not events:
@@ -352,7 +359,7 @@ async def cmd_cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await message.reply_text(f"❌ {exc}")
         return
     await message.reply_text(
-        f"🗑 Evento cancelado: *{event.summary}* "
+        f"🗑 Evento cancelado: *{_md(event.summary)}* "
         f"({event.start.strftime('%d/%m/%Y às %H:%M')}).",
         parse_mode=ParseMode.MARKDOWN,
     )

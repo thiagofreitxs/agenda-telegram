@@ -164,17 +164,15 @@ def _notify_telegram(telegram_id: int, email: str | None) -> None:
     if not config.TELEGRAM_BOT_TOKEN:
         return
     try:
+        import html as _html
+
+        texto = "✅ <b>Google conectado!</b>"
+        if email:
+            texto += f"\nConta: <code>{_html.escape(email)}</code>"
+        texto += "\n\nJá pode usar:\n<code>/novo Dentista amanhã às 14h</code>\n<code>/hoje</code>"
         requests.post(
             f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={
-                "chat_id": telegram_id,
-                "text": (
-                    "✅ *Google conectado!*"
-                    + (f"\nConta: `{email}`" if email else "")
-                    + "\n\nJá pode usar:\n`/novo Dentista amanhã às 14h`\n`/hoje`"
-                ),
-                "parse_mode": "Markdown",
-            },
+            json={"chat_id": telegram_id, "text": texto, "parse_mode": "HTML"},
             timeout=30,
         )
     except requests.RequestException:
