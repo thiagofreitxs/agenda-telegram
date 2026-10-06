@@ -32,12 +32,16 @@ def _client_config() -> dict:
 
 
 def build_flow(state: str | None = None) -> Flow:
-    return Flow.from_client_config(
+    flow = Flow.from_client_config(
         _client_config(),
         scopes=SCOPES,
         redirect_uri=config.redirect_uri(),
         state=state,
     )
+    # App web confidencial (tem client_secret): PKCE é opcional e atrapalha
+    # porque a ida e a volta usam instâncias diferentes do Flow.
+    flow.autogenerate_code_verifier = False
+    return flow
 
 
 def authorization_url(state: str) -> str:
