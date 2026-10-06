@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import requests
 from google.auth.transport.requests import Request
@@ -11,9 +12,13 @@ from google_auth_oauthlib.flow import Flow
 
 from .. import config
 
+# Evita erro quando o Google devolve escopos adicionais (ex.: "openid").
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+
 logger = logging.getLogger(__name__)
 
 SCOPES = [
+    "openid",
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/userinfo.email",
 ]
